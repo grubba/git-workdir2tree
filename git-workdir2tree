@@ -1,0 +1,111 @@
+#!/bin/sh
+
+# Convert a git new-workdir style repository into
+# a git worktree style repository.
+#
+# Henrik Grubbström 2018-05-29
+
+for helper in git realpath readlink dirname basename tar; do
+    if type "$helper" >/dev/null; then :; else
+	echo "Required command $helper is missing from PATH." >&2
+	exit 1
+    fi
+done
+
+# FIXME: What about if HEAD has no commits?
+if git rev-parse HEAD >/dev/null 2>&1; then :; else
+    # Not a git repository.
+    exit $?
+fi
+
+# Get the git-dir.
+gitdir=`git rev-parse --git-dir`
+gitdir=`realpath "$gitdir"`
+
+# NB: For worktrees the above will return the worktree git directory,
+#     NOT the .git file in the root.
+
+if [ -f "$gitdir/gitdir" ]; then
+    echo "Already a worktree." >&2
+    exit 0
+fi
+
+if [ -f "$gitdir/index" ]; then :; else
+    echo "This looks like a bare repository." >&2
+    exit 1
+fi
+
+# NB: For workdirs the git dir will contain a symlink farm to
+#     the master git repository.
+if [ -h "$gitdir/config" ]; then :; else
+    echo "Not a workdir." >&2
+    exit 1
+fi
+
+gitconfig=`readlink "$gitdir/config"`
+master_gitdir=`dirname "$gitconfig"`
+
+toplevel="`git rev-parse --show-toplevel`"
+worktree_label=`basename "$toplevel"`
+
+if [ "x$worktree_label" = "x/" ]; then
+    echo "Failed to get a suitable label for the worktree." >&2
+    exit 1
+fi
+
+if [ -d "$master_gitdir/worktrees" ]; then :; else
+    if mkdir "$master_gitdir/worktrees"; then :; else
+	echo "Failed to create worktrees directory." >&2
+	exit 1;
+    fi
+fi
+
+worktree_gitdir="$master_gitdir/worktrees/$worktree_label"
+if [ -f "$worktree_gitdir" ]; then
+    echo "A worktree named $worktree_label already exists." >&2
+    exit 1
+fi
+
+if mkdir "$worktree_gitdir"; then :; else
+    echo "Failed to create worktree git dir." >&2
+    exit 1
+fi
+
+echo "Initializing the worktree git dir..." >&2
+if echo "../.." >"$worktree_gitdir/commondir" &&
+   echo "$gitdir" >"$worktree_gitdir/gitdir"; then :; else
+    echo "Failed to initialize worktree git dir." >&2
+    exit 1
+fi
+
+# The worktree git dir should now be reasonably useable
+
+if mv "$gitdir" "$gitdir.workdir"; then :; else
+    echo "Failed to rename old git directory $gitdir." >&2
+    exit 1
+fi
+
+if echo "gitdir: $worktree_gitdir" >"$gitdir"; then :; else
+    echo "Failed to create new .git file." >&2
+    echo "Attempting to restore..." >&2
+    mv "$gitdir.workdir" "$gitdir"
+    exit 1
+fi
+
+(cd "$gitdir.workdir" && ls -A1) | while read f; do
+    if [ -h "$gitdir.workdir/$f" ]; then :; else
+	# Not a symbolic link.
+	# Attempt to move it to the worktree_gitdir.
+	echo "Moving $f..." >&2
+	if mv "$gitdir.workdir/$f" "$worktree_gitdir"; then :; else
+	    echo "Rename failed; Performing a copy instead." >&2
+	    (cd "$gitdir.workdir" && tar cf - "$f") |
+		(cd "$worktree_gitdir" && tar xvf -)
+	    # FIXME: More error handling.
+	    # Unlikely to fail though, as we were permitted to create the
+	    # target directory, and to write some files in it already.
+	fi
+    fi
+done
+	
+exit 0
